@@ -1,284 +1,169 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- 
 """
 Created on Fri Nov 22 11:53:17 2024
 
-@author: Shima
+Author: Shima
+
+Description:
+This script processes OCT images to segment retinal layers using the NDD-SEG algorithm, 
+computes thickness maps, and generates volumetric measurements for each retinal layer.
+
+Inputs:
+- OCT images stored as `.png` files in a specified directory.
+- Pretrained NDD-SEG model for segmentation.
+
+Outputs:
+- Pickle files storing the segmented boundaries and original B-scans.
+- Excel files containing volumetric measurements of retinal layers.
+- Thickness maps for individual layers and the whole retina, displayed and saved.
+
 """
 
-## Import libraries 
-import pickle
-import NDDSEG
-import cv2
-import numpy as np
-from matplotlib import pyplot as plt, cm
+# Import libraries
 import os
-from scipy import ndimage
-from scipy.ndimage import gaussian_filter
+import cv2
+import pickle
+import numpy as np
 import pandas as pd
+from matplotlib import pyplot as plt
+from scipy import ndimage
+import NDDSEG  # Assuming a custom library for NDD-SEG model
 
-
-#####################################################################
-### segment the data with NDD-SEG algorthm without any pre-processing
-#####################################################################
-path1 = '...'
-dirs = os.listdir(path1)
-
-
-# Filter and sort the filenames numerically
-image_files = sorted([f for f in dirs if f.endswith(('.png'))], key=lambda x: int(os.path.splitext(x)[0]))
-
-
-## import the NDD-SEG model
-model = NDDSEG.DUNET(ds=2)
-
-ThreeD_bscan = np.zeros((420, 750, 31))
-X = np.zeros((31, 750, 10))
-X1 = np.zeros((31, 750, 9))
-
-dirData = os.listdir('.')
-dirData = [filename for filename in dirData if filename.endswith('.pkl')]
-
-# Creating a mask to calculate the Thicknesses of Retinal layers
-mask = np.ones((512, 512))
-
-for i in range(512):
-    for j in range(512):
-        if (i - 256) ** 2 + (j - 256) ** 2 > 256 ** 2:
-            mask[i, j] = 0
-
-# Opening each data             
-
-for n, file_name in enumerate(image_files):
-    full_file_name = os.path.join(path1, file_name)
-    I = cv2.imread(full_file_name, 0)
-    I = cv2.resize(I, (750, 420))
-
-
-    ThreeD_bscan[:, :, n] = I
-
-    # Apply the NDD-SEG model for segmentation
-    J, P, T = model.predict(I)
-
-    # segmented boundaries
-
-    boundary = 0
-    for k in J.keys():
-
-        X[n, 0: len(J[k]['Y']), boundary] = J[k]['Y']
-        boundary = boundary + 1
-        X1[:,:,0:2] = X[:,:,0:2]
-        X1[:,:,2:10] = X[:,:,3:11]
-        
-# save the boundaries of each zip file in a pickle
-PicklePath = '...'
-with open(PicklePath + '\\'+'Bscans_original_C001 BASELINE OS.pkl', 'wb') as f:
-    pickle.dump(ThreeD_bscan, f)
-
-PicklePath = '...'
-with open(PicklePath + '\\'+'Boundaries_original_C001 BASELINE OS.pkl', 'wb') as f:
-    pickle.dump(X1, f)        
-
-
-############################################################
-### show the original Bscans and their segmented boundaries
-############################################################
-
-
-# open Pickle files  
-
-with open('...\\Bscans_original_C001 BASELINE OS' + '.pkl', 'rb') as f:
-    bscans_original = pickle.load(f)
+# Helper Functions
+def create_circular_mask(diameter):
+    """
+    Create a circular mask of specified diameter.
     
-with open('...\\Boundaries_original_C001 BASELINE OS' + '.pkl', 'rb') as f:
-    boundaries_original = pickle.load(f) 
-
-# show the original Bscans and segmented boundaries on them 
+    Parameters:
+    - diameter (int): Diameter of the circular mask.
     
-for i in range(len(boundaries_original)):
+    Returns:
+    - mask (ndarray): A binary mask with a circular region set to 1.
+    """
+    mask = np.ones((diameter, diameter))
+    center = diameter // 2
+    radius = center
+    for i in range(diameter):
+        for j in range(diameter):
+            if (i - center) ** 2 + (j - center) ** 2 > radius ** 2:
+                mask[i, j] = 0
+    return mask
+
+def save_pickle(data, file_path):
+    """
+    Save data to a pickle file.
+    
+    Parameters:
+    - data (object): Data to be saved.
+    - file_path (str): Destination file path for the pickle file.
+    """
+    with open(file_path, 'wb') as f:
+        pickle.dump(data, f)
+
+def load_pickle(file_path):
+    """
+    Load data from a pickle file.
+    
+    Parameters:
+    - file_path (str): Path to the pickle file.
+    
+    Returns:
+    - data (object): Loaded data from the pickle file.
+    """
+    with open(file_path, 'rb') as f:
+        return pickle.load(f)
+
+def inpaint_thickness_map(thickness_map):
+    """
+    Perform inpainting on a thickness map to correct invalid regions.
+    
+    Parameters:
+    - thickness_map (ndarray): Input thickness map.
+    
+    Returns:
+    - inpainted_map (ndarray): Corrected thickness map.
+    """
+    thickness_map = thickness_map.astype('uint8')
+    lowpass_map = ndimage.gaussian_filter(thickness_map, 3)  # Apply Gaussian smoothing
+    highpass_map = thickness_map - lowpass_map
+    thresholded_map = highpass_map > 4  # Thresholding
+    inpainted_map = cv2.inpaint(thickness_map, thresholded_map.astype('uint8'), 3, cv2.INPAINT_TELEA)
+    return inpainted_map
+
+def calculate_layer_thickness(boundaries, layer_index):
+    """
+    Calculate the thickness of a specific retinal layer from boundaries.
+    
+    Parameters:
+    - boundaries (ndarray): Array containing boundary data.
+    - layer_index (int): Index of the layer to calculate thickness for.
+    
+    Returns:
+    - thickness_map (ndarray): Thickness map for the specified layer.
+    """
+    return boundaries[:, :, layer_index + 1] - boundaries[:, :, layer_index]
+
+# Main Script
+def main():
+    # Paths
+    input_dir = '...'  # Replace with your image directory
+    pickle_output_dir = '...'  # Replace with the directory to save pickle files
+    excel_output_path = '...\\volumetric_measurements.xlsx'
+    
+    # Parameters
+    image_shape = (750, 420)  # Desired shape for resizing images
+    num_layers = 8  # Number of retinal layers
+    
+    # Load and preprocess images
+    image_files = sorted([f for f in os.listdir(input_dir) if f.endswith('.png')], 
+                         key=lambda x: int(os.path.splitext(x)[0]))
+    three_d_bscans = np.zeros((420, 750, len(image_files)))
+    
+    for n, file_name in enumerate(image_files):
+        full_path = os.path.join(input_dir, file_name)
+        image = cv2.imread(full_path, 0)  # Load in grayscale
+        image = cv2.resize(image, image_shape)
+        three_d_bscans[:, :, n] = image
+    
+    # Segment layers using the NDD-SEG model
+    model = NDDSEG.DUNET(ds=2)
+    segmented_boundaries = np.zeros((len(image_files), image_shape[1], num_layers))
+    
+    for n in range(len(image_files)):
+        segmented_data, _, _ = model.predict(three_d_bscans[:, :, n])
+        for idx, key in enumerate(segmented_data.keys()):
+            segmented_boundaries[n, :, idx] = segmented_data[key]['Y']
+    
+    # Save B-scans and boundaries
+    save_pickle(three_d_bscans, os.path.join(pickle_output_dir, 'Bscans.pkl'))
+    save_pickle(segmented_boundaries, os.path.join(pickle_output_dir, 'Boundaries.pkl'))
+    
+    # Calculate thickness maps
+    thickness_maps = []
+    for layer_index in range(num_layers):
+        thickness_map = calculate_layer_thickness(segmented_boundaries, layer_index)
+        thickness_map_resized = cv2.resize(thickness_map, (512, 512))
+        thickness_maps.append(thickness_map_resized)
+    
+    # Visualize and save results
     plt.figure()
-    plt.imshow((bscans_original[:,:740,i]),cmap = 'gray')
-    plt.plot(boundaries_original[i,:740,:], linewidth=3)  
-    plt.grid(False)
-
-# making the Thicknessmaps of original segmented data
-all_thicknessmaps_original = []
-for i in range(0,8):   
-   Z =boundaries_original[:,:740,i+1] - boundaries_original[:,:740,i]
-   Z = cv2.resize(Z,(512, 512))
-   all_thicknessmaps_original.append(Z)          
-
-# Plotting the ThicknessMaps of each of the Retinal Layers
-
-plt.figure()
-plt.imshow(all_thicknessmaps_original[0])
-plt.title('RNFL : RNFL/GCL interface - Inner Limiting Membrane')
-plt.colorbar()
-plt.grid(False)
-
-plt.figure()
-plt.imshow(all_thicknessmaps_original[1])
-plt.title('GCIPL : IPL/INL interface - RNFL/GCL interface')
-plt.colorbar()
-plt.grid(False)
-
-plt.figure()
-plt.imshow(all_thicknessmaps_original[2])
-plt.title(' INL : INL/OPL interface - IPL/INL interface')
-plt.colorbar()
-plt.grid(False)
-
-plt.figure()
-plt.imshow(all_thicknessmaps_original[3])
-plt.title(' OPL : OPL/ONL interface - INL/OPL interface ')
-plt.colorbar()
-plt.grid(False)
-
-plt.figure()
-plt.imshow(all_thicknessmaps_original[4])
-plt.title(' ONL : External Limiting Membrane - OPL/ONL interface')
-plt.colorbar()
-plt.grid(False)
-
-plt.figure()
-plt.imshow(all_thicknessmaps_original[5])
-plt.title(' ELM : Inner boundary of EZ - External Limiting Membrane')
-plt.colorbar()
-plt.grid(False)
-
-plt.figure()
-plt.imshow(all_thicknessmaps_original[6])
-plt.title(' EZ : Inner boundary of RPE/IZ complex - Inner boundary of EZ')
-plt.colorbar()
-plt.grid(False)
-
-
-plt.figure()
-plt.imshow(all_thicknessmaps_original[7])
-plt.title("RPE : Bruch's Membrane - Inner boundary of RPE/IZ complex")
-plt.colorbar()
-plt.grid(False)
-
-
-####### Calculating the volumetric measurements of each layer of the retina.
-thick_allLayers = np.stack(all_thicknessmaps_original, axis=-1)
-
-dirData = os.listdir('.')
-dirData = [filename for filename in dirData if filename.endswith('.pkl')]
-
-
-Final_results = pd.DataFrame(np.zeros((1,9)), columns=['Original_Image_Name', 'RNFL', 'GCIPL', 'INL', 'OPL', 'ONL', 'ELM', 'EZ', 'RPE'])
-
-for layer in range(1,9):
-     thickTemp = thick_allLayers[:, :, layer-1]
-     mask2 = np.ones((512, 512))
-
-     My_results = np.mean(np.mean(thickTemp[(mask == 1) & (mask2 == 1)]))
-
-
-     #Final_results = Final_results.rename(index = {n : dirData[n]})
-     Final_results.iloc[0,layer] = My_results
-Final_results.to_excel(excel_writer =  '...\\volumetric measurements original.xlsx')
-
-
-
-def inpaint(thicknessMap):
-    """
-    function to inpaint each thickness map before sending into algorithms
-    """
-    datathicknessMap = np.array(thicknessMap.astype('uint8'), dtype=float)
-
-    # One way of making a highpass filter is to simply subtract a lowpass
-    # filtered image from the original.
-    lowpassthicknessMap = ndimage.gaussian_filter(datathicknessMap, 3) #sigma = 3 pixels
-    gauss_highpassthicknessMap = datathicknessMap - lowpassthicknessMap
-    thresholdedthicknessMap = gauss_highpassthicknessMap > 4
-    thicknessMap_inpaint = cv2.inpaint(thicknessMap.astype('uint8'),thresholdedthicknessMap.astype('uint8'),3,cv2.INPAINT_TELEA)
-    return gauss_highpassthicknessMap, thresholdedthicknessMap, thicknessMap_inpaint
+    for idx, map_data in enumerate(thickness_maps):
+        plt.imshow(map_data, cmap='viridis')
+        plt.title(f'Layer {idx + 1} Thickness Map')
+        plt.colorbar()
+        plt.show()
     
-def inpaint_double(TM):
-    """
-    function to replace big values (more than 3 times of the average) remained after first inpainting and puts the average value instesd. then another inpainting is performed to smooth up the uneven parts  
-    """
-    a, Th_TM, TM_inpaint = inpaint(TM)
-    TM_inpaint[TM_inpaint > (3 * np.mean(TM_inpaint[Th_TM==0]))] = np.mean(TM_inpaint[Th_TM==0])
-    a, b, TM_inpaint2 = inpaint(TM_inpaint)
-    return TM_inpaint2
+    # Compute volumetric measurements
+    circular_mask = create_circular_mask(512)
+    results = pd.DataFrame(columns=['Layer', 'Mean Thickness'])
     
+    for idx, map_data in enumerate(thickness_maps):
+        masked_map = map_data[circular_mask == 1]
+        mean_thickness = np.mean(masked_map)
+        results = pd.concat([results, pd.DataFrame({'Layer': [idx + 1], 'Mean Thickness': [mean_thickness]})])
     
-    
-# making the Thicknessmaps after inpaiting 
-all_thicknessmaps_inpaited_original = []
-for i in range(0,8):   
-   Z =boundaries_original[:,:740,i+1] - boundaries_original[:,:740,i]
-   gauss_highpassZ, thresholdedZ, Z_inpaint = inpaint(Z)  
-   Z_inpaint2 = inpaint_double(Z_inpaint)
-   #z = np.fliplr(Z_inpaint2)
-   #z = cv2.resize(z,(256, 256))  
-   z = cv2.resize(Z_inpaint2,(512, 512))   
+    results.to_excel(excel_output_path, index=False)
+    print(f"Volumetric measurements saved to {excel_output_path}")
 
-   all_thicknessmaps_inpaited_original.append(z)          
-     
-    
-
-
-
-####### Calculating the volumetric measurements of each layer of the retina after Inpaiting
-thick_allLayers_original_inpainted = np.stack(all_thicknessmaps_inpaited_original, axis=-1)
-
-mask = np.ones((512, 512))
-
-for i in range(512):
-    for j in range(512):
-        if (i - 256) ** 2 + (j - 256) ** 2 > 256 ** 2:
-            mask[i, j] = 0
-
-
-
-dirData = os.listdir('.')
-dirData = [filename for filename in dirData if filename.endswith('.pkl')]
-#counter = len(dirData)
-
-
-Final_results_original_inpainted = pd.DataFrame(np.zeros((1,9)), columns=['Original_Image_Name', 'RNFL', 'GCIPL', 'INL', 'OPL', 'ONL', 'ELM', 'EZ', 'RPE'])
-
-for layer in range(1,9):
-     thickTemp = thick_allLayers_original_inpainted[:, :, layer-1]
-     mask2 = np.ones((512, 512))
-#C[count][layer] = np.mean(np.mean(thickTemp[(mask == 1) & (mask2 == 1)]))
-
-     My_results = np.mean(np.mean(thickTemp[(mask == 1) & (mask2 == 1)]))
-
-
-     #Final_results = Final_results.rename(index = {n : dirData[n]})
-     Final_results_original_inpainted.iloc[0,layer] = My_results
-Final_results_original_inpainted.to_excel(excel_writer =  '...\\volumetric measurements original inpainted.xlsx')
-
-
-
-
-##### Draw Thickness map of Whole Retina ######
-
-whole_retina = []
-
-Z =boundaries_original[:,:740,8] - boundaries_original[:,:740,0]
-gauss_highpassZ, thresholdedZ, Z_inpaint = inpaint(Z)  
-Z_inpaint2 = inpaint_double(Z_inpaint)
-   #z = np.fliplr(Z_inpaint2)
-   #z = cv2.resize(z,(256, 256))  
-z = cv2.resize(Z_inpaint2,(512, 512))   
-
-whole_retina.append(z)          
-     
-    
-for n in range(len(whole_retina)):
-    plt.figure()
-    plt.imshow(whole_retina[n])
-    plt.title('Thicknessmap of whole retina')
-    plt.colorbar()
-    plt.grid(False)
-    
-
-
-    
-    
-
+if __name__ == "__main__":
+    main()
